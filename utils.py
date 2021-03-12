@@ -48,10 +48,21 @@ def get_dataset(dataset, data_path):
         im_size = (32, 32)
         num_classes = 10
         mean = [0.4914, 0.4822, 0.4465]
-        std = [0.2023, 0.1994, 0.2010]
+        std = [0.2470, 0.2435, 0.2616]
         transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)])
         dst_train = datasets.CIFAR10(data_path, train=True, download=True, transform=transform)  # no augmentation
         dst_test = datasets.CIFAR10(data_path, train=False, download=True, transform=transform)
+        class_names = dst_train.classes
+
+    elif dataset == 'CIFAR100':
+        channel = 3
+        im_size = (32, 32)
+        num_classes = 100
+        mean = [0.5071, 0.4867, 0.4408]
+        std = [0.2675, 0.2565, 0.2761]
+        transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)])
+        dst_train = datasets.CIFAR100(data_path, train=True, download=True, transform=transform)  # no augmentation
+        dst_test = datasets.CIFAR100(data_path, train=False, download=True, transform=transform)
         class_names = dst_train.classes
 
     else:
@@ -278,24 +289,21 @@ def evaluate_synset(it_eval, net, images_train, labels_train, testloader, learni
     net = net.to(device)
     images_train = images_train.to(device)
     labels_train = labels_train.to(device)
-    lr = float(learningrate)
-    lr_schedule = [Epoch//2+1]
-    optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=0.0005)
+    optimizer = torch.optim.SGD(net.parameters(), lr=float(learningrate), momentum=0.9, weight_decay=5e-4)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[Epoch//2], gamma=0.1)
     criterion = nn.CrossEntropyLoss().to(device)
 
     dst_train = TensorDataset(images_train, labels_train)
     trainloader = torch.utils.data.DataLoader(dst_train, batch_size=batchsize_train, shuffle=True, num_workers=0)
 
     start = time.time()
-    for ep in range(Epoch+1):
+    for _ in range(Epoch):
         loss_train, acc_train = epoch('train', trainloader, net, optimizer, criterion, param_augment, device)
-        if ep in lr_schedule:
-            lr *= 0.1
-            optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=0.0005)
-
+        scheduler.step()
     time_train = time.time() - start
     loss_test, acc_test = epoch('test', testloader, net, optimizer, criterion, param_augment, device)
-    print('%s Evaluate_%02d: epoch = %04d train time = %d s train loss = %.6f train acc = %.4f, test acc = %.4f' % (get_time(), it_eval, Epoch, int(time_train), loss_train, acc_train, acc_test))
+    print('%s Evaluate_%02d: epoch = %04d, train time = %ds, train loss = %.6f, test loss = %.6f, train acc = %.4f, test acc = %.4f' %
+          (get_time(), it_eval, Epoch, int(time_train), loss_train, loss_test, acc_train, acc_test))
 
     return net, acc_train, acc_test
 

@@ -197,6 +197,7 @@ def VGG19(channel, num_classes):
 
 
 class BasicBlock_AP(nn.Module):
+    # The conv(stride=2) is replaced by conv(stride=1) + avgpool(kernel_size=2, stride=2)
     expansion = 1
 
     def __init__(self, in_planes, planes, stride=1, norm='instancenorm'):
@@ -260,7 +261,6 @@ class Bottleneck_AP(nn.Module):
 
 
 class ResNet_AP(nn.Module):
-    # The conv(stride=2) is replaced by conv(stride=1) + avgpool(kernel_size=2, stride=2)
     def __init__(self, block, num_blocks, channel=3, num_classes=10, norm='instancenorm'):
         super(ResNet_AP, self).__init__()
         self.in_planes = 64

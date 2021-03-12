@@ -25,7 +25,7 @@ def main():
     parser.add_argument('--batch_real', type=int, default=256, help='batch size for real data')
     parser.add_argument('--batch_train', type=int, default=256, help='batch size for training networks')
     parser.add_argument('--init', type=str, default='noise', help='initialization of synthetic data, noise/real: initialize from random noise or real images. The two initializations will get similar performances.')
-    parser.add_argument('--data_path', type=str, default='data', help='dataset path')
+    parser.add_argument('--data_path', type=str, default='../data', help='dataset path')
     parser.add_argument('--save_path', type=str, default='result', help='path to save results')
     parser.add_argument('--dis_metric', type=str, default='ours', help='distance metric')
     # For speeding up, we can decrease the Iteration and epoch_eval_train, which will not cause significant performance decrease.

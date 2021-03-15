@@ -9,7 +9,7 @@ from scipy.ndimage.interpolation import rotate as scipyrotate
 from networks import MLP, ConvNet, LeNet, AlexNet, VGG11BN, VGG11, ResNet18, ResNet18BN_AP
 
 
-def get_dataset(dataset, data_path):
+def get_dataset(dataset, data_path, batch_size=256):
     if dataset == 'MNIST':
         channel = 1
         im_size = (28, 28)
@@ -68,14 +68,19 @@ def get_dataset(dataset, data_path):
     else:
         exit('unknown dataset: %s' % dataset)
 
+    trainloader = torch.utils.data.DataLoader(dst_train, batch_size=batch_size, shuffle=True, num_workers=2)
     testloader = torch.utils.data.DataLoader(dst_test, batch_size=256, shuffle=False, num_workers=2)
-    return channel, im_size, num_classes, class_names, mean, std, dst_train, dst_test, testloader
+    return channel, im_size, num_classes, class_names, mean, std, dst_train, dst_test, trainloader, testloader
 
 
 class TensorDataset(Dataset):
-    def __init__(self, images, labels):  # images: n x c x h x w tensor
-        self.images = images.detach().float()
-        self.labels = labels.detach()
+    def __init__(self, images, labels, detach_flag=True):  # images: n x c x h x w tensor
+        if detach_flag:
+            self.images = images.detach().float()
+            self.labels = labels.detach()
+        else:
+            self.images = images.float()
+            self.labels = labels
 
     def __getitem__(self, index):
         return self.images[index], self.labels[index]
@@ -188,21 +193,54 @@ def distance_wb(gwr, gws):
         gws = gws.reshape(1, shape[0])
         return 0
 
-    dis_weight = torch.sum(1 - torch.sum(gwr * gws, dim=-1) / (torch.norm(gwr, dim=-1) * torch.norm(gws, dim=-1) + 0.000001))
-    dis = dis_weight
-    return dis
+    gwr_norm, gws_norm = torch.norm(gwr, dim=-1), torch.norm(gws, dim=-1)
+    dot_product = torch.sum(gwr * gws, dim=-1)
+    dis = 1 - dot_product / (gwr_norm * gws_norm)
+    return torch.sum(dis)
 
 
-def match_loss(gw_syn, gw_real, args):
-    dis = torch.tensor(0.0).to(args.device)
+def distance_imporved(gwr, gws):
+    shape = gwr.shape
+    if len(shape) == 4:  # conv, out*in*h*w
+        gwr = gwr.reshape(shape[0], shape[1] * shape[2] * shape[3])
+        gws = gws.reshape(shape[0], shape[1] * shape[2] * shape[3])
+    elif len(shape) == 3:  # layernorm, C*h*w
+        gwr = gwr.reshape(shape[0], shape[1] * shape[2])
+        gws = gws.reshape(shape[0], shape[1] * shape[2])
+    elif len(shape) == 2:  # linear, out*in
+        tmp = 'do nothing'
+    elif len(shape) == 1:  # batchnorm/instancenorm, C; groupnorm x, bias
+        gwr = gwr.reshape(1, shape[0])
+        gws = gws.reshape(1, shape[0])
+        return 0
 
-    if args.dis_metric == 'ours':
+    gwr_norm, gws_norm = torch.norm(gwr, dim=-1), torch.norm(gws, dim=-1)
+    dot_product = torch.sum(gwr * gws, dim=-1)
+    dis1 = 1 - dot_product / (gwr_norm * gws_norm)
+    dis2 = torch.norm(gwr - gws, dim=-1)
+    # dis3 = torch.norm(gwr - gws, dim=-1) / gwr.shape[1]
+    # dis4 = ((gwr - gws)**2).sum(dim=-1)
+    # dis5 = ((gwr - gws)**2).mean(dim=-1)
+    # dis6 = (gwr_norm - gws_norm)**2
+    return torch.sum(dis1 + dis2)
+
+
+def match_loss(gw_syn, gw_real, dis_metric):
+    dis = 0.0
+
+    if dis_metric == 'ours':
         for ig in range(len(gw_real)):
             gwr = gw_real[ig]
             gws = gw_syn[ig]
             dis += distance_wb(gwr, gws)
 
-    elif args.dis_metric == 'mse':
+    elif dis_metric == 'improved':
+        for ig in range(len(gw_real)):
+            gwr = gw_real[ig]
+            gws = gw_syn[ig]
+            dis += distance_imporved(gwr, gws)
+
+    elif dis_metric == 'mse':
         gw_real_vec = []
         gw_syn_vec = []
         for ig in range(len(gw_real)):
@@ -212,7 +250,7 @@ def match_loss(gw_syn, gw_real, args):
         gw_syn_vec = torch.cat(gw_syn_vec, dim=0)
         dis = torch.sum((gw_syn_vec - gw_real_vec)**2)
 
-    elif args.dis_metric == 'cos':
+    elif dis_metric == 'cos':
         gw_real_vec = []
         gw_syn_vec = []
         for ig in range(len(gw_real)):
@@ -220,7 +258,7 @@ def match_loss(gw_syn, gw_real, args):
             gw_syn_vec.append(gw_syn[ig].reshape((-1)))
         gw_real_vec = torch.cat(gw_real_vec, dim=0)
         gw_syn_vec = torch.cat(gw_syn_vec, dim=0)
-        dis = 1 - torch.sum(gw_real_vec * gw_syn_vec, dim=-1) / (torch.norm(gw_real_vec, dim=-1) * torch.norm(gw_syn_vec, dim=-1) + 0.000001)
+        dis = 1 - F.cosine_similarity(gw_real_vec, gw_syn_vec, dim=1)
 
     else:
         exit('DC error: unknown distance function')

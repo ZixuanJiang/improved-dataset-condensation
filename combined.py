@@ -40,8 +40,8 @@ def main():
     if not os.path.exists(args.save_path):
         os.mkdir(args.save_path)
 
-    eval_it_pool = np.arange(0, args.Iteration+1, 500).tolist() if args.eval_mode == 'S' else [args.Iteration]  # The list of iterations when we evaluate models and record results.
-    channel, im_size, num_classes, class_names, mean, std, dst_train, dst_test, testloader = get_dataset(args.dataset, args.data_path)
+    eval_it_pool = np.arange(500, args.Iteration+1, 500).tolist() if args.eval_mode == 'S' else [args.Iteration]  # The list of iterations when we evaluate models and record results.
+    channel, im_size, num_classes, class_names, mean, std, dst_train, dst_test, trainloader_real, testloader = get_dataset(args.dataset, args.data_path, args.batch_real)
     model_eval_pool = get_eval_pool(args.eval_mode, args.model, args.model)
 
     accs_all_exps = dict()  # record performances of all experiments
@@ -119,7 +119,7 @@ def main():
                         accs_all_exps[model_eval] += accs
 
                 ''' visualize and save '''
-                save_name = os.path.join(args.save_path, 'vis_%s_%s_%dipc_exp%d_iter%d.png' % (args.dataset, args.model, args.ipc, exp, it))
+                save_name = os.path.join(args.save_path, 'baseline_%s_%s_%dipc_exp%d_iter%d.png' % (args.dataset, args.model, args.ipc, exp, it))
                 image_syn_vis = copy.deepcopy(image_syn.detach().cpu())
                 for ch in range(channel):
                     image_syn_vis[:, ch] = image_syn_vis[:, ch] * std[ch] + mean[ch]
@@ -158,6 +158,8 @@ def main():
 
                 ''' update synthetic data '''
                 loss = torch.tensor(0.0).to(args.device)
+                gw_real_vec = list(0.0 for _ in net_parameters)
+                gw_syn_vec = list(0.0 for _ in net_parameters)
                 for c in range(num_classes):
                     img_real = get_images(c, args.batch_real)
                     lab_real = torch.ones((img_real.shape[0],), device=args.device, dtype=torch.long) * c
@@ -165,14 +167,23 @@ def main():
                     loss_real = criterion(output_real, lab_real)
                     gw_real = torch.autograd.grad(loss_real, net_parameters)
                     gw_real = list((_.detach().clone() for _ in gw_real))
+                    for i, grad in enumerate(gw_real):
+                        gw_real_vec[i] += grad
 
                     img_syn = image_syn[c*args.ipc:(c+1)*args.ipc].reshape((args.ipc, channel, im_size[0], im_size[1]))
                     lab_syn = torch.ones((args.ipc,), device=args.device, dtype=torch.long) * c
                     output_syn = net(img_syn)
                     loss_syn = criterion(output_syn, lab_syn)
                     gw_syn = torch.autograd.grad(loss_syn, net_parameters, create_graph=True)
+                    for i, grad in enumerate(gw_syn):
+                        gw_syn_vec[i] += grad
 
-                    loss += match_loss(gw_syn, gw_real, args)
+                    loss += match_loss(gw_syn, gw_real, args.dis_metric)
+
+                for i in range(len(gw_real)):
+                    gw_real_vec[i] /= num_classes
+                    gw_syn_vec[i] /= num_classes
+                loss += num_classes * match_loss(gw_syn_vec, gw_real_vec, args.dis_metric)
 
                 optimizer_img.zero_grad()
                 loss.backward()

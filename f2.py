@@ -202,8 +202,10 @@ def main():
                     inner_loop = 100
                 elif ol < 4:
                     inner_loop = 50
-                else:
+                elif ol < 10:
                     inner_loop = 10
+                else:
+                    inner_loop = 5
 
                 for il in range(inner_loop):
                     epoch('train', trainloader, net, optimizer_net, criterion, None, args.device)

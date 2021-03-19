@@ -27,7 +27,9 @@ def main():
     parser.add_argument('--init', type=str, default='noise', help='initialization of synthetic data, noise/real: initialize from random noise or real images. The two initializations will get similar performances.')
     parser.add_argument('--data_path', type=str, default='../data', help='dataset path')
     parser.add_argument('--save_path', type=str, default='result', help='path to save results')
-    parser.add_argument('--dis_metric', type=str, default='ours', help='distance metric')
+    parser.add_argument('--dis_metric', type=str, default='baseline', help='distance metric')
+    parser.add_argument('--adaptive_step', dest='adaptive_step', action='store_true', help='If enabled, the adaptive learning step is used.')
+    parser.add_argument('--file_name_prefix', type=str, default='inter-class', help='the prefix name of the generated file (png file and pt file)')
     # For speeding up, we can decrease the Iteration and epoch_eval_train, which will not cause significant performance decrease.
 
     args = parser.parse_args()
@@ -89,6 +91,10 @@ def main():
         else:
             print('initialize synthetic data from random noise')
 
+        dst_syn_train = TensorDataset(image_syn, label_syn, detach_flag=False)
+        trainloader_syn = torch.utils.data.DataLoader(dst_syn_train, batch_size=args.batch_train, shuffle=True, num_workers=0)
+        iter_trainloader_syn = iter(trainloader_syn)
+
         ''' training '''
         optimizer_img = torch.optim.SGD([image_syn, ], lr=args.lr_img, momentum=0.5)  # optimizer_img for synthetic data
         optimizer_img.zero_grad()
@@ -120,7 +126,7 @@ def main():
                         accs_all_exps[model_eval] += accs
 
                 ''' visualize and save '''
-                save_name = os.path.join(args.save_path, 'baseline_%s_%s_%dipc_exp%d_iter%d.png' % (args.dataset, args.model, args.ipc, exp, it))
+                save_name = os.path.join(args.save_path, '%s_%s_%s_%dipc_exp%d_iter%d.png' % (args.file_name_prefix, args.dataset, args.model, args.ipc, exp, it))
                 image_syn_vis = copy.deepcopy(image_syn.detach().cpu())
                 for ch in range(channel):
                     image_syn_vis[:, ch] = image_syn_vis[:, ch] * std[ch] + mean[ch]
@@ -158,22 +164,27 @@ def main():
                             module.eval()  # fix mu and sigma of every BatchNorm layer
 
                 ''' update synthetic data '''
-                loss = torch.tensor(0.0).to(args.device)
-                for c in range(num_classes):
-                    img_real = get_images(c, args.batch_real)
-                    lab_real = torch.ones((img_real.shape[0],), device=args.device, dtype=torch.long) * c
-                    output_real = net(img_real)
-                    loss_real = criterion(output_real, lab_real)
-                    gw_real = torch.autograd.grad(loss_real, net_parameters)
-                    gw_real = list((_.detach().clone() for _ in gw_real))
+                try:
+                    img_syn, lab_syn = iter_trainloader_syn.next()
+                except:
+                    iter_trainloader_syn = iter(trainloader_syn)
+                    img_syn, lab_syn = iter_trainloader_syn.next()
+                output_syn = net(img_syn)
+                loss_syn = criterion(output_syn, lab_syn)
+                gw_syn = torch.autograd.grad(loss_syn, net_parameters, create_graph=True)
 
-                    img_syn = image_syn[c*args.ipc:(c+1)*args.ipc].reshape((args.ipc, channel, im_size[0], im_size[1]))
-                    lab_syn = torch.ones((args.ipc,), device=args.device, dtype=torch.long) * c
-                    output_syn = net(img_syn)
-                    loss_syn = criterion(output_syn, lab_syn)
-                    gw_syn = torch.autograd.grad(loss_syn, net_parameters, create_graph=True)
+                try:
+                    img_real, lab_real = iter_trainloader_real.next()
+                except:
+                    iter_trainloader_real = iter(trainloader_real)
+                    img_real, lab_real = iter_trainloader_real.next()
+                img_real, lab_real = img_real.to(args.device), lab_real.to(args.device)
+                output_real = net(img_real)
+                loss_real = criterion(output_real, lab_real)
+                gw_real = torch.autograd.grad(loss_real, net_parameters)
+                gw_real = list((_.detach().clone() for _ in gw_real))
 
-                    loss += match_loss(gw_syn, gw_real, args.dis_metric)
+                loss = num_classes * match_loss(gw_syn, gw_real, args.dis_metric)
 
                 optimizer_img.zero_grad()
                 loss.backward()
@@ -183,39 +194,34 @@ def main():
                 if ol == args.outer_loop - 1:
                     break
 
-                try:
-                    img_real, lab_real = iter_trainloader_real.next()
-                except:
-                    iter_trainloader_real = iter(trainloader_real)
-                    img_real, lab_real = iter_trainloader_real.next()
-                img_real, lab_real = img_real.to(args.device), lab_real.to(args.device)
-
                 ''' update network '''
                 image_syn_train, label_syn_train = copy.deepcopy(image_syn.detach()), copy.deepcopy(label_syn.detach())  # avoid any unaware modification
-                dst_syn_train = TensorDataset(image_syn_train, label_syn_train)
-                trainloader = torch.utils.data.DataLoader(dst_syn_train, batch_size=args.batch_train, shuffle=True, num_workers=0)
+                dst_syn_train_copy = TensorDataset(image_syn_train, label_syn_train)
+                trainloader = torch.utils.data.DataLoader(dst_syn_train_copy, batch_size=args.batch_train, shuffle=True, num_workers=0)
 
-                with torch.no_grad():
-                    previous_validation_loss = criterion(net(img_real), lab_real)
-                inner_loop = 0
-                while True:
-                    inner_loop += 1
-                    train_loss, _ = epoch('train', trainloader, net, optimizer_net, criterion, None, args.device)
-                    with torch.no_grad():
-                        current_validation_loss = criterion(net(img_real), lab_real)
-                    if current_validation_loss > previous_validation_loss:
-                        break
-                    previous_validation_loss = current_validation_loss
-                print(ol, inner_loop, train_loss, current_validation_loss)
+                if args.adaptive_step:
+                    if ol == 0:
+                        inner_loop = 100
+                    elif ol < 4:
+                        inner_loop = 50
+                    elif ol < 10:
+                        inner_loop = 10
+                    else:
+                        inner_loop = 5
+                else:
+                    inner_loop = args.inner_loop
 
-            loss_avg /= (num_classes*args.outer_loop)
+                for il in range(inner_loop):
+                    epoch('train', trainloader, net, optimizer_net, criterion, None, args.device)
+
+            loss_avg /= (num_classes * args.outer_loop)
 
             if it % 10 == 0:
                 print('%s iter = %04d, loss = %.4f' % (get_time(), it, loss_avg))
 
             if it == args.Iteration:  # only record the final results
                 data_save.append([copy.deepcopy(image_syn.detach().cpu()), copy.deepcopy(label_syn.detach().cpu())])
-                torch.save({'data': data_save, 'accs_all_exps': accs_all_exps, }, os.path.join(args.save_path, 'res_%s_%s_%dipc.pt' % (args.dataset, args.model, args.ipc)))
+                torch.save({'data': data_save, 'accs_all_exps': accs_all_exps, }, os.path.join(args.save_path, '%s_%s_%s_%dipc.pt' % (args.file_name_prefix, args.dataset, args.model, args.ipc)))
 
     print('\n==================== Final Results ====================\n')
     for key in model_eval_pool:

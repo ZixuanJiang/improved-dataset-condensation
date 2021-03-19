@@ -27,7 +27,9 @@ def main():
     parser.add_argument('--init', type=str, default='noise', help='initialization of synthetic data, noise/real: initialize from random noise or real images. The two initializations will get similar performances.')
     parser.add_argument('--data_path', type=str, default='../data', help='dataset path')
     parser.add_argument('--save_path', type=str, default='result', help='path to save results')
-    parser.add_argument('--dis_metric', type=str, default='ours', help='distance metric')
+    parser.add_argument('--dis_metric', type=str, default='baseline', help='distance metric')
+    parser.add_argument('--adaptive_step', dest='adaptive_step', action='store_true', help='If enabled, the adaptive learning step is used.')
+    parser.add_argument('--file_name_prefix', type=str, default='baseline', help='the prefix name of the generated file (png file and pt file)')
     # For speeding up, we can decrease the Iteration and epoch_eval_train, which will not cause significant performance decrease.
 
     args = parser.parse_args()
@@ -119,7 +121,7 @@ def main():
                         accs_all_exps[model_eval] += accs
 
                 ''' visualize and save '''
-                save_name = os.path.join(args.save_path, 'baseline_%s_%s_%dipc_exp%d_iter%d.png' % (args.dataset, args.model, args.ipc, exp, it))
+                save_name = os.path.join(args.save_path, '%s_%s_%s_%dipc_exp%d_iter%d.png' % (args.file_name_prefix, args.dataset, args.model, args.ipc, exp, it))
                 image_syn_vis = copy.deepcopy(image_syn.detach().cpu())
                 for ch in range(channel):
                     image_syn_vis[:, ch] = image_syn_vis[:, ch] * std[ch] + mean[ch]
@@ -184,19 +186,32 @@ def main():
 
                 ''' update network '''
                 image_syn_train, label_syn_train = copy.deepcopy(image_syn.detach()), copy.deepcopy(label_syn.detach())  # avoid any unaware modification
-                dst_syn_train = TensorDataset(image_syn_train, label_syn_train)
-                trainloader = torch.utils.data.DataLoader(dst_syn_train, batch_size=args.batch_train, shuffle=True, num_workers=0)
-                for il in range(args.inner_loop):
+                dst_syn_train_copy = TensorDataset(image_syn_train, label_syn_train)
+                trainloader = torch.utils.data.DataLoader(dst_syn_train_copy, batch_size=args.batch_train, shuffle=True, num_workers=0)
+
+                if args.adaptive_step:
+                    if ol == 0:
+                        inner_loop = 100
+                    elif ol < 4:
+                        inner_loop = 50
+                    elif ol < 10:
+                        inner_loop = 10
+                    else:
+                        inner_loop = 5
+                else:
+                    inner_loop = args.inner_loop
+
+                for il in range(inner_loop):
                     epoch('train', trainloader, net, optimizer_net, criterion, None, args.device)
 
-            loss_avg /= (num_classes*args.outer_loop)
+            loss_avg /= (num_classes * args.outer_loop)
 
             if it % 10 == 0:
                 print('%s iter = %04d, loss = %.4f' % (get_time(), it, loss_avg))
 
             if it == args.Iteration:  # only record the final results
                 data_save.append([copy.deepcopy(image_syn.detach().cpu()), copy.deepcopy(label_syn.detach().cpu())])
-                torch.save({'data': data_save, 'accs_all_exps': accs_all_exps, }, os.path.join(args.save_path, 'res_%s_%s_%dipc.pt' % (args.dataset, args.model, args.ipc)))
+                torch.save({'data': data_save, 'accs_all_exps': accs_all_exps, }, os.path.join(args.save_path, '%s_%s_%s_%dipc.pt' % (args.file_name_prefix, args.dataset, args.model, args.ipc)))
 
     print('\n==================== Final Results ====================\n')
     for key in model_eval_pool:

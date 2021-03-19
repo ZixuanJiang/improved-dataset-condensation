@@ -20,14 +20,16 @@ def main():
     parser.add_argument('--num_eval', type=int, default=20, help='the number of evaluating randomly initialized models')
     parser.add_argument('--epoch_eval_train', type=int, default=300, help='epochs to train a model with synthetic data')
     parser.add_argument('--Iteration', type=int, default=1000, help='training iterations')
-    parser.add_argument('--lr_img', type=float, default=1, help='learning rate for updating synthetic images')
+    parser.add_argument('--lr_img', type=float, default=0.1, help='learning rate for updating synthetic images')
     parser.add_argument('--lr_net', type=float, default=0.01, help='learning rate for updating network parameters')
-    parser.add_argument('--batch_real', type=int, default=1024, help='batch size for real data')
+    parser.add_argument('--batch_real', type=int, default=256, help='batch size for real data')
     parser.add_argument('--batch_train', type=int, default=256, help='batch size for training networks')
     parser.add_argument('--init', type=str, default='noise', help='initialization of synthetic data, noise/real: initialize from random noise or real images. The two initializations will get similar performances.')
     parser.add_argument('--data_path', type=str, default='../data', help='dataset path')
     parser.add_argument('--save_path', type=str, default='result', help='path to save results')
-    parser.add_argument('--dis_metric', type=str, default='ours', help='distance metric')
+    parser.add_argument('--dis_metric', type=str, default='baseline', help='distance metric')
+    parser.add_argument('--adaptive_step', dest='adaptive_step', action='store_true', help='If enabled, the adaptive learning step is used.')
+    parser.add_argument('--file_name_prefix', type=str, default='multi-level', help='the prefix name of the generated file (png file and pt file)')
     # For speeding up, we can decrease the Iteration and epoch_eval_train, which will not cause significant performance decrease.
 
     args = parser.parse_args()
@@ -42,7 +44,6 @@ def main():
 
     eval_it_pool = np.arange(500, args.Iteration+1, 500).tolist() if args.eval_mode == 'S' else [args.Iteration]  # The list of iterations when we evaluate models and record results.
     channel, im_size, num_classes, class_names, mean, std, dst_train, dst_test, trainloader_real, testloader = get_dataset(args.dataset, args.data_path, args.batch_real)
-    iter_trainloader_real = iter(trainloader_real)
     model_eval_pool = get_eval_pool(args.eval_mode, args.model, args.model)
 
     accs_all_exps = dict()  # record performances of all experiments
@@ -89,10 +90,6 @@ def main():
         else:
             print('initialize synthetic data from random noise')
 
-        dst_syn_train = TensorDataset(image_syn, label_syn, detach_flag=False)
-        trainloader_syn = torch.utils.data.DataLoader(dst_syn_train, batch_size=args.batch_train, shuffle=True, num_workers=0)
-        iter_trainloader_syn = iter(trainloader_syn)
-
         ''' training '''
         optimizer_img = torch.optim.SGD([image_syn, ], lr=args.lr_img, momentum=0.5)  # optimizer_img for synthetic data
         optimizer_img.zero_grad()
@@ -124,7 +121,7 @@ def main():
                         accs_all_exps[model_eval] += accs
 
                 ''' visualize and save '''
-                save_name = os.path.join(args.save_path, 'baseline_%s_%s_%dipc_exp%d_iter%d.png' % (args.dataset, args.model, args.ipc, exp, it))
+                save_name = os.path.join(args.save_path, '%s_%s_%s_%dipc_exp%d_iter%d.png' % (args.file_name_prefix, args.dataset, args.model, args.ipc, exp, it))
                 image_syn_vis = copy.deepcopy(image_syn.detach().cpu())
                 for ch in range(channel):
                     image_syn_vis[:, ch] = image_syn_vis[:, ch] * std[ch] + mean[ch]
@@ -162,27 +159,33 @@ def main():
                             module.eval()  # fix mu and sigma of every BatchNorm layer
 
                 ''' update synthetic data '''
-                try:
-                    img_syn, lab_syn = iter_trainloader_syn.next()
-                except:
-                    iter_trainloader_syn = iter(trainloader_syn)
-                    img_syn, lab_syn = iter_trainloader_syn.next()
-                output_syn = net(img_syn)
-                loss_syn = criterion(output_syn, lab_syn)
-                gw_syn = torch.autograd.grad(loss_syn, net_parameters, create_graph=True)
+                loss = torch.tensor(0.0).to(args.device)
+                gw_real_vec = list(0.0 for _ in net_parameters)
+                gw_syn_vec = list(0.0 for _ in net_parameters)
+                for c in range(num_classes):
+                    img_real = get_images(c, args.batch_real)
+                    lab_real = torch.ones((img_real.shape[0],), device=args.device, dtype=torch.long) * c
+                    output_real = net(img_real)
+                    loss_real = criterion(output_real, lab_real)
+                    gw_real = torch.autograd.grad(loss_real, net_parameters)
+                    gw_real = list((_.detach().clone() for _ in gw_real))
+                    for i, grad in enumerate(gw_real):
+                        gw_real_vec[i] += grad
 
-                try:
-                    img_real, lab_real = iter_trainloader_real.next()
-                except:
-                    iter_trainloader_real = iter(trainloader_real)
-                    img_real, lab_real = iter_trainloader_real.next()
-                img_real, lab_real = img_real.to(args.device), lab_real.to(args.device)
-                output_real = net(img_real)
-                loss_real = criterion(output_real, lab_real)
-                gw_real = torch.autograd.grad(loss_real, net_parameters)
-                gw_real = list((_.detach().clone() for _ in gw_real))
+                    img_syn = image_syn[c*args.ipc:(c+1)*args.ipc].reshape((args.ipc, channel, im_size[0], im_size[1]))
+                    lab_syn = torch.ones((args.ipc,), device=args.device, dtype=torch.long) * c
+                    output_syn = net(img_syn)
+                    loss_syn = criterion(output_syn, lab_syn)
+                    gw_syn = torch.autograd.grad(loss_syn, net_parameters, create_graph=True)
+                    for i, grad in enumerate(gw_syn):
+                        gw_syn_vec[i] += grad
 
-                loss = match_loss(gw_syn, gw_real, args.dis_metric)
+                    loss += match_loss(gw_syn, gw_real, args.dis_metric)
+
+                for i in range(len(gw_real)):
+                    gw_real_vec[i] /= num_classes
+                    gw_syn_vec[i] /= num_classes
+                loss += num_classes * match_loss(gw_syn_vec, gw_real_vec, args.dis_metric)
 
                 optimizer_img.zero_grad()
                 loss.backward()
@@ -196,17 +199,30 @@ def main():
                 image_syn_train, label_syn_train = copy.deepcopy(image_syn.detach()), copy.deepcopy(label_syn.detach())  # avoid any unaware modification
                 dst_syn_train_copy = TensorDataset(image_syn_train, label_syn_train)
                 trainloader = torch.utils.data.DataLoader(dst_syn_train_copy, batch_size=args.batch_train, shuffle=True, num_workers=0)
-                for il in range(args.inner_loop):
+
+                if args.adaptive_step:
+                    if ol == 0:
+                        inner_loop = 100
+                    elif ol < 4:
+                        inner_loop = 50
+                    elif ol < 10:
+                        inner_loop = 10
+                    else:
+                        inner_loop = 5
+                else:
+                    inner_loop = args.inner_loop
+
+                for il in range(inner_loop):
                     epoch('train', trainloader, net, optimizer_net, criterion, None, args.device)
 
-            loss_avg /= args.outer_loop
+            loss_avg /= (num_classes * args.outer_loop)
 
             if it % 10 == 0:
                 print('%s iter = %04d, loss = %.4f' % (get_time(), it, loss_avg))
 
             if it == args.Iteration:  # only record the final results
                 data_save.append([copy.deepcopy(image_syn.detach().cpu()), copy.deepcopy(label_syn.detach().cpu())])
-                torch.save({'data': data_save, 'accs_all_exps': accs_all_exps, }, os.path.join(args.save_path, 'res_%s_%s_%dipc.pt' % (args.dataset, args.model, args.ipc)))
+                torch.save({'data': data_save, 'accs_all_exps': accs_all_exps, }, os.path.join(args.save_path, '%s_%s_%s_%dipc.pt' % (args.file_name_prefix, args.dataset, args.model, args.ipc)))
 
     print('\n==================== Final Results ====================\n')
     for key in model_eval_pool:

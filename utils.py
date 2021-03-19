@@ -178,7 +178,7 @@ def get_time():
     return str(time.strftime("[%Y-%m-%d %H:%M:%S]", time.localtime()))
 
 
-def distance_wb(gwr, gws):
+def distance_baseline(gwr, gws):
     shape = gwr.shape
     if len(shape) == 4:  # conv, out*in*h*w
         gwr = gwr.reshape(shape[0], shape[1] * shape[2] * shape[3])
@@ -193,13 +193,11 @@ def distance_wb(gwr, gws):
         gws = gws.reshape(1, shape[0])
         return 0
 
-    gwr_norm, gws_norm = torch.norm(gwr, dim=-1), torch.norm(gws, dim=-1)
-    dot_product = torch.sum(gwr * gws, dim=-1)
-    dis = 1 - dot_product / (gwr_norm * gws_norm)
+    dis = 1 - F.cosine_similarity(gwr, gws, dim=-1)
     return torch.sum(dis)
 
 
-def distance_imporved(gwr, gws):
+def distance_improved(gwr, gws):
     shape = gwr.shape
     if len(shape) == 4:  # conv, out*in*h*w
         gwr = gwr.reshape(shape[0], shape[1] * shape[2] * shape[3])
@@ -214,31 +212,27 @@ def distance_imporved(gwr, gws):
         gws = gws.reshape(1, shape[0])
         return 0
 
-    gwr_norm, gws_norm = torch.norm(gwr, dim=-1), torch.norm(gws, dim=-1)
-    dot_product = torch.sum(gwr * gws, dim=-1)
-    dis1 = 1 - dot_product / (gwr_norm * gws_norm)
+    dis1 = 1 - F.cosine_similarity(gwr, gws, dim=-1)
     dis2 = torch.norm(gwr - gws, dim=-1)
-    # dis3 = torch.norm(gwr - gws, dim=-1) / gwr.shape[1]
-    # dis4 = ((gwr - gws)**2).sum(dim=-1)
-    # dis5 = ((gwr - gws)**2).mean(dim=-1)
-    # dis6 = (gwr_norm - gws_norm)**2
+    # dis3 = ((gwr - gws)**2).sum(dim=-1)
+    # dis4 = ((gwr - gws)**2).mean(dim=-1)
     return torch.sum(dis1 + dis2)
 
 
 def match_loss(gw_syn, gw_real, dis_metric):
-    dis = 0.0
-
-    if dis_metric == 'ours':
+    if dis_metric == 'baseline':
+        dis = 0.0
         for ig in range(len(gw_real)):
             gwr = gw_real[ig]
             gws = gw_syn[ig]
-            dis += distance_wb(gwr, gws)
+            dis += distance_baseline(gwr, gws)
 
     elif dis_metric == 'improved':
+        dis = 0.0
         for ig in range(len(gw_real)):
             gwr = gw_real[ig]
             gws = gw_syn[ig]
-            dis += distance_imporved(gwr, gws)
+            dis += distance_improved(gwr, gws)
 
     elif dis_metric == 'mse':
         gw_real_vec = []
@@ -288,7 +282,7 @@ def get_loops(ipc):
 
 
 def epoch(mode, dataloader, net, optimizer, criterion, param_augment, device):
-    loss_avg, acc_avg, num_exp = 0, 0, 0
+    loss_avg, correct, num_exp = 0, 0, 0
     net = net.to(device)
     criterion = criterion.to(device)
 
@@ -306,10 +300,10 @@ def epoch(mode, dataloader, net, optimizer, criterion, param_augment, device):
 
         output = net(img)
         loss = criterion(output, lab)
-        acc = np.sum(np.equal(np.argmax(output.cpu().data.numpy(), axis=-1), lab.cpu().data.numpy()))
+        _, predicted_class = output.max(1)
 
-        loss_avg += loss.item()*n_b
-        acc_avg += acc
+        loss_avg += loss.item() * n_b
+        correct += predicted_class.eq(lab).sum().item()
         num_exp += n_b
 
         if mode == 'train':
@@ -318,9 +312,9 @@ def epoch(mode, dataloader, net, optimizer, criterion, param_augment, device):
             optimizer.step()
 
     loss_avg /= num_exp
-    acc_avg /= num_exp
+    accuracy = correct / num_exp
 
-    return loss_avg, acc_avg
+    return loss_avg, accuracy
 
 
 def evaluate_synset(it_eval, net, images_train, labels_train, testloader, learningrate, batchsize_train, param_augment, device, Epoch=600):
@@ -339,6 +333,7 @@ def evaluate_synset(it_eval, net, images_train, labels_train, testloader, learni
         loss_train, acc_train = epoch('train', trainloader, net, optimizer, criterion, param_augment, device)
         scheduler.step()
     time_train = time.time() - start
+
     loss_test, acc_test = epoch('test', testloader, net, optimizer, criterion, param_augment, device)
     print('%s Evaluate_%02d: epoch = %04d, train time = %ds, train loss = %.6f, test loss = %.6f, train acc = %.4f, test acc = %.4f' %
           (get_time(), it_eval, Epoch, int(time_train), loss_train, loss_test, acc_train, acc_test))

@@ -252,7 +252,7 @@ def match_loss(gw_syn, gw_real, dis_metric):
             gw_syn_vec.append(gw_syn[ig].reshape((-1)))
         gw_real_vec = torch.cat(gw_real_vec, dim=0)
         gw_syn_vec = torch.cat(gw_syn_vec, dim=0)
-        dis = 1 - F.cosine_similarity(gw_real_vec, gw_syn_vec, dim=1)
+        dis = 1 - F.cosine_similarity(gw_real_vec, gw_syn_vec, dim=-1)
 
     else:
         exit('DC error: unknown distance function')

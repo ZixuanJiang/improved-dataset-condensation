@@ -29,7 +29,7 @@ def main():
     parser.add_argument('--save_path', type=str, default='result', help='path to save results')
     parser.add_argument('--dis_metric', type=str, default='baseline', help='distance metric')
     parser.add_argument('--adaptive_step', dest='adaptive_step', action='store_true', help='If enabled, the adaptive learning step is used.')
-    parser.add_argument('--file_name_prefix', type=str, default='multi-level', help='the prefix name of the generated file (png file and pt file)')
+    parser.add_argument('--file_name_prefix', type=str, default='multi-level-overfitting', help='the prefix name of the generated file (png file and pt file)')
     # For speeding up, we can decrease the Iteration and epoch_eval_train, which will not cause significant performance decrease.
 
     args = parser.parse_args()
@@ -44,6 +44,7 @@ def main():
 
     eval_it_pool = np.arange(500, args.Iteration+1, 500).tolist() if args.eval_mode == 'S' else [args.Iteration]  # The list of iterations when we evaluate models and record results.
     channel, im_size, num_classes, class_names, mean, std, dst_train, dst_test, trainloader_real, testloader = get_dataset(args.dataset, args.data_path, args.batch_real)
+    iter_trainloader_real = iter(trainloader_real)
     model_eval_pool = get_eval_pool(args.eval_mode, args.model, args.model)
 
     accs_all_exps = dict()  # record performances of all experiments
@@ -195,23 +196,30 @@ def main():
                 if ol == args.outer_loop - 1:
                     break
 
+                try:
+                    img_real, lab_real = iter_trainloader_real.next()
+                except:
+                    iter_trainloader_real = iter(trainloader_real)
+                    img_real, lab_real = iter_trainloader_real.next()
+                img_real, lab_real = img_real.to(args.device), lab_real.to(args.device)
+
                 ''' update network '''
                 image_syn_train, label_syn_train = copy.deepcopy(image_syn.detach()), copy.deepcopy(label_syn.detach())  # avoid any unaware modification
                 dst_syn_train_copy = TensorDataset(image_syn_train, label_syn_train)
                 trainloader = torch.utils.data.DataLoader(dst_syn_train_copy, batch_size=args.batch_train, shuffle=True, num_workers=0)
 
-                if args.adaptive_step:
-                    if ol < 4:
-                        inner_loop = 50 - 10 * ol
-                    elif ol < 10:
-                        inner_loop = 10
-                    else:
-                        inner_loop = 5
-                else:
-                    inner_loop = args.inner_loop
-
-                for il in range(inner_loop):
-                    epoch('train', trainloader, net, optimizer_net, criterion, None, args.device)
+                with torch.no_grad():
+                    previous_validation_loss = criterion(net(img_real), lab_real)
+                inner_loop = 0
+                while True:
+                    inner_loop += 1
+                    train_loss, _ = epoch('train', trainloader, net, optimizer_net, criterion, None, args.device)
+                    with torch.no_grad():
+                        current_validation_loss = criterion(net(img_real), lab_real)
+                    if current_validation_loss > previous_validation_loss or inner_loop == 50:
+                        break
+                    previous_validation_loss = current_validation_loss
+                print(it, ol, inner_loop, train_loss, current_validation_loss)
 
             loss_avg /= (num_classes * args.outer_loop)
 

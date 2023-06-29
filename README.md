@@ -1,4 +1,4 @@
-This repository is for **Paper 6674, Delving into Effective Gradient Matching for Dataset Condensation** as a ICCV 2021 submission. We adapt the [original implementation](https://github.com/VICO-UoE/DatasetCondensation). Please refer to the [original README file](https://github.com/VICO-UoE/DatasetCondensation/blob/master/readme.md) for more experimental settings.
+This repository is for [**Delving into Effective Gradient Matching for Dataset Condensation**](https://arxiv.org/abs/2208.00311). We adapt the [original implementation](https://github.com/VICO-UoE/DatasetCondensation). Please refer to the [original README file](https://github.com/VICO-UoE/DatasetCondensation/blob/master/readme.md) for more experimental settings.
 
 # Our proposed method
 We implement different gradient matching methods in four python scripts.
